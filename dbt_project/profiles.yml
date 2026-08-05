@@ -1,0 +1,38 @@
+# Three targets, one codebase.
+#
+#   dev  - DuckDB file on your laptop. No credentials, no spend.
+#   ci   - DuckDB in GitHub Actions, into a PR-scoped schema.
+#   prod - BigQuery, deployed on merge to main.
+#
+# Every value is overridable by environment variable so the same file works in
+# all three places and nothing secret is committed.
+
+lodestar:
+  target: "{{ env_var('DBT_TARGET', 'dev') }}"
+  outputs:
+    dev:
+      type: duckdb
+      path: "{{ env_var('LODESTAR_DUCKDB_PATH', '../data/lodestar.duckdb') }}"
+      schema: "{{ env_var('DBT_SCHEMA', 'lodestar') }}"
+      threads: 8
+
+    ci:
+      type: duckdb
+      path: "{{ env_var('LODESTAR_DUCKDB_PATH', '../data/lodestar.duckdb') }}"
+      # CI builds into a schema named after the PR, so concurrent PRs cannot
+      # clobber each other and the schema is trivially droppable.
+      schema: "{{ env_var('DBT_SCHEMA', 'ci') }}"
+      threads: 4
+
+    prod:
+      type: bigquery
+      method: "{{ env_var('DBT_BQ_METHOD', 'oauth') }}"
+      project: "{{ env_var('LODESTAR_GCP_PROJECT', '') }}"
+      dataset: "{{ env_var('DBT_SCHEMA', 'lodestar') }}"
+      location: "{{ env_var('LODESTAR_BQ_LOCATION', 'US') }}"
+      threads: 8
+      job_execution_timeout_seconds: 600
+      job_retries: 2
+      priority: interactive
+      # Fail the run rather than silently scanning a fortune.
+      maximum_bytes_billed: 100000000000

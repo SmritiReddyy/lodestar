@@ -1,0 +1,13 @@
+packages:
+  # Cross-database helpers: surrogate keys, date spine, richer generic tests.
+  - package: dbt-labs/dbt_utils
+    version: [">=1.3.0", "<2.0.0"]
+
+  # Distribution / range / recency assertions that plain schema tests can't express.
+  - package: metaplane/dbt_expectations
+    version: [">=0.10.0", "<0.11.0"]
+
+  # Calendar helpers. Declared explicitly (not just inherited via
+  # dbt_expectations) because dim_date calls it directly.
+  - package: godatadriven/dbt_date
+    version: [">=0.11.0", "<1.0.0"]

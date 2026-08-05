@@ -1,0 +1,55 @@
+name: "lodestar"
+version: "0.1.0"
+config-version: 2
+
+profile: "lodestar"
+
+model-paths: ["models"]
+analysis-paths: ["analyses"]
+test-paths: ["tests"]
+seed-paths: ["seeds"]
+macro-paths: ["macros"]
+snapshot-paths: ["snapshots"]
+
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+# Surfaced in the docs site and in every model's compiled header.
+models:
+  lodestar:
+    +persist_docs:
+      relation: true
+      columns: true
+
+    staging:
+      +materialized: view
+      +schema: staging
+      +tags: ["staging"]
+
+    intermediate:
+      +materialized: view
+      +schema: intermediate
+      +tags: ["intermediate"]
+
+    marts:
+      +materialized: table
+      +schema: marts
+      +tags: ["marts"]
+
+snapshots:
+  lodestar:
+    +target_schema: snapshots
+
+tests:
+  lodestar:
+    # A failing test writes its offending rows to a table so the failure can be
+    # inspected instead of just counted.
+    +store_failures: true
+    +schema: test_failures
+
+vars:
+  # Anything before this is treated as bad data rather than history.
+  earliest_valid_order_date: "2015-01-01"
+  # Orders delivered after their promise date count as an SLA breach.
+  delivery_sla_grace_days: 0
