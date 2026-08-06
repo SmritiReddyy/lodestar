@@ -1,0 +1,82 @@
+version: 2
+
+sources:
+  - name: olist
+    description: >
+      Raw landing tables written by the Lodestar extract/load layer. One row per
+      source row, plus lineage columns (`ingest_date`, `_ingested_at`,
+      `_source_file`, `_run_id`). Nothing here is cleaned — staging owns that.
+    schema: "{{ env_var('LODESTAR_RAW_DATASET', 'lodestar_raw') }}"
+    database: "{{ env_var('LODESTAR_RAW_DATABASE', target.database) }}"
+
+    # Alert if the pipeline stops delivering. Checked with `dbt source freshness`.
+    loaded_at_field: _ingested_at
+    freshness:
+      warn_after: {count: 24, period: hour}
+      error_after: {count: 48, period: hour}
+
+    tables:
+      - name: orders
+        description: Order headers. Landed incrementally by purchase date.
+        columns:
+          - name: order_id
+            description: Primary key.
+            data_tests: [unique, not_null]
+          - name: customer_id
+            data_tests: [not_null]
+          - name: order_status
+            data_tests:
+              - accepted_values:
+                  arguments:
+                    values: [delivered, shipped, canceled, unavailable, invoiced, processing, created, approved]
+
+      - name: order_items
+        description: Order line items. Landed incrementally by shipping limit date.
+        data_tests:
+          - dbt_utils.unique_combination_of_columns:
+              arguments:
+                combination_of_columns: [order_id, order_item_id]
+        columns:
+          - name: order_id
+            data_tests: [not_null]
+          - name: price
+            data_tests: [not_null]
+
+      - name: order_payments
+        description: Payment splits; an order may settle across several rows.
+        data_tests:
+          - dbt_utils.unique_combination_of_columns:
+              arguments:
+                combination_of_columns: [order_id, payment_sequential]
+
+      - name: order_reviews
+        description: Post-purchase survey responses.
+
+      - name: customers
+        description: Order-scoped customer records.
+        columns:
+          - name: customer_id
+            data_tests: [unique, not_null]
+
+      - name: products
+        description: Product catalogue, Portuguese category names.
+        columns:
+          - name: product_id
+            data_tests: [unique, not_null]
+
+      - name: sellers
+        description: Marketplace sellers.
+        columns:
+          - name: seller_id
+            data_tests: [unique, not_null]
+
+      - name: geolocation
+        description: >
+          Lat/lng samples per zip prefix. Intentionally non-unique upstream —
+          many observations per prefix.
+
+      - name: product_category_translation
+        description: Portuguese to English category lookup.
+        columns:
+          - name: product_category_name
+            data_tests: [unique, not_null]
