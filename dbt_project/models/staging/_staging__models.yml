@@ -1,0 +1,195 @@
+version: 2
+
+models:
+  - name: stg_olist__orders
+    description: >
+      One row per order, deduplicated on `order_id` keeping the most recently
+      ingested copy. Timestamps renamed to `*_at`, dates to `*_date`.
+    columns:
+      - name: order_id
+        description: Primary key.
+        data_tests:
+          - unique
+          - not_null
+      - name: customer_id
+        description: Order-scoped customer key. Joins to stg_olist__customers.
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_olist__customers')
+                field: customer_id
+      - name: order_status
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [delivered, shipped, canceled, unavailable, invoiced, processing, created, approved]
+      - name: purchased_at
+        description: When the order was placed. Never null.
+        data_tests:
+          - not_null
+      - name: estimated_delivery_at
+        description: Delivery promise made at purchase time; the SLA baseline.
+        data_tests:
+          - not_null
+
+  - name: stg_olist__order_items
+    description: One row per order line, deduplicated on (order_id, line_number).
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [order_id, line_number]
+    columns:
+      - name: order_item_key
+        description: Surrogate key over (order_id, line_number).
+        data_tests:
+          - unique
+          - not_null
+      - name: order_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_olist__orders')
+                field: order_id
+      - name: item_price
+        description: Item price excluding freight. Never negative.
+        data_tests:
+          - not_null
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 0
+                strictly: false
+      - name: freight_value
+        data_tests:
+          - not_null
+      - name: item_total
+        description: item_price + freight_value, rounded once at this layer.
+        data_tests:
+          - not_null
+
+  - name: stg_olist__order_payments
+    description: One row per payment split, deduplicated on (order_id, payment_sequential).
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [order_id, payment_sequential]
+    columns:
+      - name: order_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_olist__orders')
+                field: order_id
+      - name: payment_type
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [credit_card, boleto, voucher, debit_card, not_defined]
+      - name: payment_installments
+        description: Normalised so a one-off purchase reads as 1, never 0.
+        data_tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 1
+                strictly: false
+
+  - name: stg_olist__order_reviews
+    description: One row per (review_id, order_id), filtered to scores 1-5.
+    columns:
+      - name: review_score
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [1, 2, 3, 4, 5]
+                quote: false
+      - name: review_sentiment
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [promoter, passive, detractor]
+      - name: order_id
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('stg_olist__orders')
+                field: order_id
+
+  - name: stg_olist__customers
+    description: One row per order-scoped `customer_id`.
+    columns:
+      - name: customer_id
+        data_tests:
+          - unique
+          - not_null
+      - name: customer_unique_id
+        description: Stable person key. Repeats across a customer's orders.
+        data_tests:
+          - not_null
+      - name: customer_state
+        data_tests:
+          - not_null
+          - dbt_expectations.expect_column_value_lengths_to_equal:
+              arguments:
+                value: 2
+      - name: customer_region
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [Norte, Nordeste, Centro-Oeste, Sudeste, Sul, Unknown]
+
+  - name: stg_olist__products
+    description: One row per product, with the upstream `_lenght` typo corrected.
+    columns:
+      - name: product_id
+        data_tests:
+          - unique
+          - not_null
+      - name: category_name
+        description: English category name; 'unknown' where the source has none.
+        data_tests:
+          - not_null
+
+  - name: stg_olist__sellers
+    columns:
+      - name: seller_id
+        data_tests:
+          - unique
+          - not_null
+      - name: seller_state
+        data_tests:
+          - not_null
+
+  - name: stg_olist__geolocation
+    description: >
+      Coordinate samples per zip prefix, filtered to Brazil's bounding box.
+      Intentionally many rows per prefix — dim_geography collapses it.
+    columns:
+      - name: zip_code_prefix
+        data_tests:
+          - not_null
+      - name: latitude
+        data_tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: -33.75
+                max_value: 5.27
+      - name: longitude
+        data_tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: -73.99
+                max_value: -34.79
+
+  - name: stg_olist__product_category_translation
+    columns:
+      - name: category_name_pt
+        data_tests:
+          - unique
+          - not_null
+      - name: category_name_en
+        data_tests:
+          - not_null
