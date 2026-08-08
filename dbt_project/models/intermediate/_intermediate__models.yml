@@ -1,0 +1,101 @@
+version: 2
+
+models:
+  - name: int_orders__payment_summary
+    description: >
+      Payment splits collapsed to one row per order, so fct_orders can join
+      without fanning out. `primary_payment_type` is the largest single split.
+    columns:
+      - name: order_id
+        data_tests:
+          - unique
+          - not_null
+      - name: payment_total
+        data_tests:
+          - not_null
+      - name: payment_count
+        data_tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 1
+                strictly: false
+
+  - name: int_orders__item_summary
+    description: >
+      Line items rolled up to order grain. `gross_item_revenue` excludes
+      freight so revenue and shipping stay separable downstream.
+    columns:
+      - name: order_id
+        data_tests:
+          - unique
+          - not_null
+      - name: item_count
+        data_tests:
+          - not_null
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 1
+                strictly: false
+      - name: gross_item_revenue
+        data_tests:
+          - not_null
+      - name: primary_category
+        description: Category the order spent the most money in.
+        data_tests:
+          - not_null
+
+  - name: int_orders__review_summary
+    description: Reviews reduced to order grain, keeping the first response.
+    columns:
+      - name: order_id
+        data_tests:
+          - unique
+          - not_null
+      - name: avg_review_score
+        data_tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 1
+                max_value: 5
+
+  - name: int_orders__delivery_timeline
+    description: >
+      The five raw order timestamps turned into delivery measures. Owns all the
+      null-handling so no downstream model re-derives it.
+    columns:
+      - name: order_id
+        data_tests:
+          - unique
+          - not_null
+      - name: customer_id
+        data_tests:
+          - not_null
+      - name: delivery_status
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [delivered_on_time, delivered_late, in_transit, approved, pending, canceled]
+      - name: is_late
+        description: >
+          Null until the order is delivered — deliberately, so that averaging
+          it cannot silently score in-flight orders as on time.
+      - name: promised_lead_days
+        data_tests:
+          - not_null
+
+  - name: int_order_items__enriched
+    description: >
+      Line items with product, seller, order and customer context attached, so
+      fct_order_items is a projection rather than a five-way join.
+    columns:
+      - name: order_item_key
+        data_tests:
+          - unique
+          - not_null
+      - name: order_id
+        data_tests:
+          - not_null
+      - name: purchased_date
+        data_tests:
+          - not_null
