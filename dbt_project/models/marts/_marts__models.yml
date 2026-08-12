@@ -1,0 +1,288 @@
+version: 2
+
+models:
+  # ------------------------------------------------------------------ facts
+
+  - name: fct_orders
+    description: >
+      **Grain: one row per order.** The primary fact table. Incremental on
+      `purchased_date` with a 7-day lookback so late-arriving payments and
+      reviews are picked up rather than frozen.
+    columns:
+      - name: order_key
+        description: Primary key. Degenerate dimension — the natural order id.
+        data_tests:
+          - unique
+          - not_null
+      - name: customer_key
+        description: Foreign key to dim_customers.
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_customers')
+                field: customer_key
+      - name: purchased_date_key
+        description: Foreign key to dim_date. Also the partition column.
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_date')
+                field: date_key
+      - name: order_status
+        data_tests:
+          - not_null
+      - name: delivery_status
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [delivered_on_time, delivered_late, in_transit, approved, pending, canceled]
+      - name: item_count
+        data_tests:
+          - not_null
+      - name: gross_item_revenue
+        description: Sum of item prices, excluding freight.
+        data_tests:
+          - not_null
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 0
+                strictly: false
+      - name: order_total
+        description: gross_item_revenue + freight_revenue.
+        data_tests:
+          - not_null
+      - name: payment_variance
+        description: >
+          payment_total - order_total. Should be zero for any order with both
+          payments and items; `assert_payments_reconcile_to_orders` enforces it.
+      - name: avg_review_score
+        data_tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 1
+                max_value: 5
+      - name: days_to_delivery
+        data_tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 0
+                max_value: 400
+                strictly: false
+
+  - name: fct_order_items
+    description: >
+      **Grain: one row per order line.** The lowest-grain fact; every revenue
+      figure in the warehouse rolls up from here. Partitioned on purchase date
+      and clustered on the columns dashboards filter hardest.
+    columns:
+      - name: order_item_key
+        description: Surrogate key over (order_id, line_number).
+        data_tests:
+          - unique
+          - not_null
+      - name: order_key
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('fct_orders')
+                field: order_key
+      - name: product_key
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_products')
+                field: product_key
+      - name: seller_key
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_sellers')
+                field: seller_key
+      - name: customer_key
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_customers')
+                field: customer_key
+      - name: purchased_date_key
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_date')
+                field: date_key
+      - name: item_price
+        data_tests:
+          - not_null
+      - name: item_total
+        data_tests:
+          - not_null
+      - name: freight_ratio
+        description: freight_value / item_price. Null when the item is free.
+
+  # ------------------------------------------------------------- dimensions
+
+  - name: dim_customers
+    description: >
+      **Grain: one row per `customer_id`** (the per-order key the facts join
+      on). `customer_unique_id` carries person identity; lifetime measures are
+      computed at that level.
+    columns:
+      - name: customer_key
+        data_tests:
+          - unique
+          - not_null
+      - name: customer_unique_id
+        data_tests:
+          - not_null
+      - name: customer_state
+        data_tests:
+          - not_null
+      - name: customer_region
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [Norte, Nordeste, Centro-Oeste, Sudeste, Sul, Unknown]
+      - name: lifetime_order_count
+        data_tests:
+          - not_null
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 1
+                strictly: false
+
+  - name: dim_products
+    description: "**Grain: one row per product**, with sales rollups attached."
+    columns:
+      - name: product_key
+        data_tests:
+          - unique
+          - not_null
+      - name: category_name
+        data_tests:
+          - not_null
+      - name: weight_class
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [light, medium, heavy, oversized, unknown]
+      - name: units_sold
+        data_tests:
+          - not_null
+
+  - name: dim_sellers
+    description: "**Grain: one row per seller**, with fulfilment performance."
+    columns:
+      - name: seller_key
+        data_tests:
+          - unique
+          - not_null
+      - name: seller_state
+        data_tests:
+          - not_null
+      - name: late_delivery_rate
+        description: late_order_count / delivered_order_count. Null if none delivered.
+        data_tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 0
+                max_value: 1
+
+  - name: dim_geography
+    description: >
+      **Grain: one row per zip prefix.** Collapses the many geolocation samples
+      into a centroid plus the modal city/state.
+    columns:
+      - name: zip_code_prefix
+        data_tests:
+          - unique
+          - not_null
+      - name: state
+        data_tests:
+          - not_null
+      - name: region
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [Norte, Nordeste, Centro-Oeste, Sudeste, Sul, Unknown]
+
+  - name: dim_date
+    description: "**Grain: one row per calendar day**, 2022-01-01 to 2026-12-31."
+    columns:
+      - name: date_key
+        data_tests:
+          - unique
+          - not_null
+      - name: iso_day_of_week
+        description: ISO convention, 1 = Monday through 7 = Sunday.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [1, 2, 3, 4, 5, 6, 7]
+                quote: false
+      - name: is_weekend
+        data_tests:
+          - not_null
+
+  - name: dim_sellers_history
+    description: >
+      **Grain: one row per seller per unchanged period.** Type 2 companion to
+      dim_sellers, built from the `snap_sellers` snapshot. Answers "where was
+      this seller when that order shipped?" rather than "where are they now?".
+    columns:
+      - name: seller_version_key
+        description: Surrogate key over (seller_id, valid_from).
+        data_tests:
+          - unique
+          - not_null
+      - name: seller_key
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_sellers')
+                field: seller_key
+      - name: valid_from
+        data_tests:
+          - not_null
+      - name: valid_to
+        description: Null on the currently-active version.
+      - name: is_current
+        data_tests:
+          - not_null
+      - name: version_number
+        data_tests:
+          - not_null
+
+  # ------------------------------------------------------------- aggregates
+
+  - name: agg_daily_performance
+    description: >
+      **Grain: purchase date x customer state x category.** Pre-aggregated for
+      the BI layer so dashboard panels read a small table instead of rescanning
+      the lowest-grain fact.
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [purchased_date, customer_state, category_name]
+    columns:
+      - name: purchased_date
+        data_tests:
+          - not_null
+      - name: total_revenue
+        data_tests:
+          - not_null
+      - name: late_delivery_rate
+        data_tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 0
+                max_value: 1
