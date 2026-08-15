@@ -1,0 +1,143 @@
+# Local Airflow for Lodestar.
+#
+# Uses LocalExecutor rather than the CeleryExecutor the upstream example ships
+# with. Celery needs Redis plus separate worker containers — roughly 4 GB of
+# extra RAM for no benefit at this scale. LocalExecutor runs tasks as
+# subprocesses of the scheduler and fits comfortably on a laptop.
+#
+#   docker compose up -d          start
+#   docker compose logs -f        follow
+#   docker compose down -v        stop and wipe the metadata DB
+#
+# UI: http://localhost:8080  (airflow / airflow)
+
+x-lodestar-common: &lodestar-common
+  build:
+    context: ..
+    dockerfile: airflow/Dockerfile
+  environment: &lodestar-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW__CORE__PARALLELISM: "4"
+    AIRFLOW__CORE__MAX_ACTIVE_TASKS_PER_DAG: "4"
+    # Scanning for new DAGs every 5s burns CPU on a laptop for no benefit.
+    AIRFLOW__SCHEDULER__MIN_FILE_PROCESS_INTERVAL: "60"
+    AIRFLOW__SCHEDULER__DAG_DIR_LIST_INTERVAL: "60"
+    AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
+    AIRFLOW__LOGGING__LOGGING_LEVEL: INFO
+
+    # --- Lodestar configuration ---
+    # Defaults target the local DuckDB warehouse. Point these at GCS/BigQuery
+    # (see `terraform output pipeline_env`) to run the same DAG against the cloud.
+    LODESTAR_HOME: /opt/lodestar
+    LODESTAR_BIN_PATH: /home/airflow/.local/bin
+    LODESTAR_TARGET: "${LODESTAR_TARGET:-local}"
+    LODESTAR_SOURCE_DIR: /opt/lodestar/data/source
+    LODESTAR_LANDING_URI: "${LODESTAR_LANDING_URI:-/opt/lodestar/data/landing}"
+    LODESTAR_DUCKDB_PATH: /opt/lodestar/data/lodestar.duckdb
+    LODESTAR_RAW_DATASET: "${LODESTAR_RAW_DATASET:-lodestar_raw}"
+    LODESTAR_GCP_PROJECT: "${LODESTAR_GCP_PROJECT:-}"
+    LODESTAR_SYNTHETIC_ORDERS: "${LODESTAR_SYNTHETIC_ORDERS:-100000}"
+    DBT_TARGET: "${DBT_TARGET:-dev}"
+    DBT_SCHEMA: "${DBT_SCHEMA:-lodestar}"
+    DBT_PROFILES_DIR: /opt/lodestar/dbt_project
+    PYTHONPATH: /opt/lodestar/ingestion:/opt/lodestar
+  volumes:
+    # The whole repo is mounted, so editing a model or a DAG on the host takes
+    # effect without a rebuild.
+    - ..:/opt/lodestar
+    - ./dags:/opt/airflow/dags
+    - ./logs:/opt/airflow/logs
+    - ./plugins:/opt/airflow/plugins
+  user: "50000:0"
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  # Runs once, then exits. Everything else waits on it completing successfully.
+  airflow-init:
+    <<: *lodestar-common
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        set -euo pipefail
+        airflow db migrate
+        airflow users create \
+          --username "${AIRFLOW_ADMIN_USER:-airflow}" \
+          --password "${AIRFLOW_ADMIN_PASSWORD:-airflow}" \
+          --firstname Lodestar --lastname Admin \
+          --role Admin --email admin@example.com \
+          || echo "admin user already exists"
+        echo "Airflow initialised."
+    environment:
+      <<: *lodestar-env
+      _AIRFLOW_DB_MIGRATE: "true"
+    restart: on-failure
+
+  airflow-scheduler:
+    <<: *lodestar-common
+    command: scheduler
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type SchedulerJob --hostname "$${HOSTNAME}"']
+      interval: 30s
+      timeout: 20s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+
+  airflow-webserver:
+    <<: *lodestar-common
+    command: webserver
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+
+volumes:
+  postgres-data:
