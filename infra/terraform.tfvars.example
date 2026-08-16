@@ -1,0 +1,13 @@
+# Copy to terraform.tfvars and fill in. Never commit the real file.
+project_id  = "your-gcp-project-id"
+region      = "us-central1"
+bq_location = "US"
+environment = "dev"
+
+# Optional: pin the bucket name instead of generating one.
+# landing_bucket_name = "my-lodestar-landing"
+
+# Managed Airflow costs ~USD 300+/month. Leave false unless demonstrating it.
+enable_composer = false
+
+# alert_email = "you@example.com"
