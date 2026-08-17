@@ -1,0 +1,172 @@
+name: CI
+
+# Every pull request builds the entire warehouse from scratch against DuckDB and
+# runs every test. That is only affordable because the dev target is a local
+# file: a full build-and-test costs seconds and zero cloud spend, so there is no
+# reason to let an untested model reach main.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  # A new push supersedes the in-flight run for the same branch.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.11"
+  # A small dataset keeps CI fast; correctness does not depend on volume.
+  LODESTAR_SYNTHETIC_ORDERS: "20000"
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install
+        run: pip install -e ".[dev]"
+
+      - name: Ruff
+        run: ruff check ingestion quality tests
+
+      - name: Ruff format
+        run: ruff format --check ingestion quality tests
+
+      - name: Terraform format
+        run: terraform fmt -check -recursive infra
+
+  terraform:
+    name: Terraform validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.8
+
+      - name: Init (no backend)
+        working-directory: infra
+        run: terraform init -backend=false -input=false
+
+      - name: Validate
+        working-directory: infra
+        run: terraform validate
+
+  build:
+    name: Build & test warehouse
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install
+        run: pip install -e ".[dev]"
+
+      - name: Unit tests
+        run: pytest -q
+
+      # Each PR builds into its own schema, so concurrent PRs cannot clobber
+      # each other's tables and the namespace is trivially droppable.
+      - name: Set PR-scoped schema
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "DBT_SCHEMA=ci_pr_${{ github.event.number }}" >> "$GITHUB_ENV"
+          else
+            echo "DBT_SCHEMA=ci_main" >> "$GITHUB_ENV"
+          fi
+          echo "DBT_TARGET=ci" >> "$GITHUB_ENV"
+
+      - name: Seed source data
+        run: lodestar-ingest seed --orders "$LODESTAR_SYNTHETIC_ORDERS"
+
+      - name: Extract & load full history
+        run: |
+          lodestar-ingest extract --full-history --ingest-date 2025-01-01
+          lodestar-ingest load --full-history --ingest-date 2025-01-01
+
+      - name: dbt deps
+        working-directory: dbt_project
+        run: dbt deps
+
+      # `build` interleaves models and their tests, so a failing test stops its
+      # downstream models rather than letting bad data propagate through the run.
+      - name: dbt build
+        working-directory: dbt_project
+        env:
+          DBT_PROFILES_DIR: .
+        run: dbt build --target ci --full-refresh
+
+      - name: dbt snapshot
+        working-directory: dbt_project
+        env:
+          DBT_PROFILES_DIR: .
+        run: dbt snapshot --target ci
+
+      - name: Great Expectations
+        run: python -m quality.run_checks --scale "$LODESTAR_SYNTHETIC_ORDERS"
+
+      # Proves the incremental path, not just the full refresh. A model that
+      # only ever works with --full-refresh is a model that breaks in production
+      # on day two.
+      - name: Verify incremental run is idempotent
+        working-directory: dbt_project
+        env:
+          DBT_PROFILES_DIR: .
+        run: |
+          dbt run --target ci --select fct_orders fct_order_items
+          dbt run --target ci --select fct_orders fct_order_items
+          dbt test --target ci --select fct_orders fct_order_items
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dbt-artifacts-${{ github.run_id }}
+          path: |
+            dbt_project/target/manifest.json
+            dbt_project/target/run_results.json
+            quality/results/latest.json
+          retention-days: 14
+          if-no-files-found: warn
+
+  dag-validation:
+    name: Airflow DAG import
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      # Catches the failure mode where a DAG has a syntax error, a cycle, or a
+      # bad import and only reveals it once the scheduler tries to parse it.
+      - name: Install Airflow
+        run: |
+          pip install "apache-airflow==2.10.5" \
+            --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-2.10.5/constraints-3.11.txt"
+          pip install -e . --no-deps
+
+      - name: Import every DAG
+        env:
+          AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+          AIRFLOW__CORE__DAGS_FOLDER: airflow/dags
+          LODESTAR_HOME: ${{ github.workspace }}
+        run: python tests/validate_dags.py
