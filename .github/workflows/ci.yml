@@ -43,9 +43,6 @@ jobs:
       - name: Ruff format
         run: ruff format --check ingestion quality tests
 
-      - name: Terraform format
-        run: terraform fmt -check -recursive infra
-
   terraform:
     name: Terraform validate
     runs-on: ubuntu-latest
@@ -55,6 +52,13 @@ jobs:
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.9.8
+
+      # Formatting lives here rather than in the lint job: Terraform is no
+      # longer preinstalled on GitHub's runner images, so it has to be set up
+      # by the job that uses it, with a pinned version.
+      - name: Format check
+        working-directory: infra
+        run: terraform fmt -check -recursive .
 
       - name: Init (no backend)
         working-directory: infra
