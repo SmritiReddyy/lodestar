@@ -5,11 +5,20 @@ name: CI
 # file: a full build-and-test costs seconds and zero cloud spend, so there is no
 # reason to let an untested model reach main.
 
+# Docs-only changes don't touch anything CI checks, so they don't trigger it.
 on:
   pull_request:
     branches: [main]
+    paths-ignore:
+      - '*.md'
+      - 'docs/**'
+      - 'LICENSE'
   push:
     branches: [main]
+    paths-ignore:
+      - '*.md'
+      - 'docs/**'
+      - 'LICENSE'
   workflow_dispatch:
 
 concurrency:
