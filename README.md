@@ -38,7 +38,7 @@ dimension for seller history, and a pre-aggregated table for the BI layer.
 ## What came out of it
 
 - **100,000 orders / 151,040 line items** through the pipeline
-- **155 dbt tests**, all passing — including cross-grain reconciliation that
+- **155 dbt tests**: 154 pass and 1 is an intentional threshold warning — including cross-grain reconciliation that
   catches the classic fan-out bug
 - Runs against **DuckDB locally and BigQuery in production** from one codebase,
   so CI builds and tests the whole thing in ~10 seconds for free
